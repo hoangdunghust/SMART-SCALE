@@ -1,0 +1,11 @@
+# Các thư mục được sinh ra tự động, không cần đẩy lên
+Debug/
+Release/
+.settings/
+*.launch
+*.map
+*.o
+*.d
+*.elf
+*.bin
+*.hex
