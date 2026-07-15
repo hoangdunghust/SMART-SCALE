@@ -103,7 +103,7 @@ Chờ người dùng đưa thẻ RFID.
 
 ### Bước 6
 
-Đo khối lượng liên tục.
+Đo khối lượng mỗi 5s một lần.
 
 ### Bước 7
 
@@ -221,12 +221,3 @@ Ví dụ dữ liệu gửi đến máy tính:
 - Thêm cảm biến chiều cao để tính BMI.
 - Đồng bộ dữ liệu với Cloud.
 
----
-
-## Tác giả
-
-**Hoàng Dũng**
-
-Chuyên ngành: Công nghệ thông tin
-
-Dự án môn học: Hệ thống nhúng (Embedded Systems)
