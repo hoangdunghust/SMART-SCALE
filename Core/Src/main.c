@@ -74,12 +74,24 @@ uint8_t rtc_day, rtc_date, rtc_month, rtc_year;
 // Buffer truyền UART
 char uart_tx_buffer[256];
 
-// Mảng mã LED 7 đoạn cho Anode chung (A->PD0, B->PD1, ..., G->PD6)
-//uint8_t LED_CA_CODE[] = {0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8, 0x80, 0x90};
-// Mảng mã HEX được tính toán chính xác 100% theo đúng sơ đồ chân thực tế của bạn:
+// Mảng mã LED 7 đoạn cho Anode chung
 uint8_t LED_CA_CODE[] = {0xC0, 0xCF, 0xA4, 0x86, 0x8B, 0x92, 0x90, 0xC7, 0x80, 0x82};
 // Mảng lưu dữ liệu hiển thị hiện tại cho 2 LED (mặc định tắt - 0xFF)
 uint8_t display_digits[2] = {0xFF, 0xFF};
+
+typedef struct {
+    uint8_t day, month, year;
+    uint8_t hour, minute, second;
+} TimeStamp_t;
+
+typedef struct {
+    uint8_t uid[4];
+    float weight_history[3];
+    TimeStamp_t time_history[3]; // Lưu thời gian tương ứng cho 3 lần cân
+    uint8_t count;
+} CardHistory_t;
+
+CardHistory_t current_card_log = {0};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -89,7 +101,10 @@ static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_RTC_Init(void);
+
 /* USER CODE BEGIN PFP */
+
+void Update_And_Log_History(uint8_t *uid, float new_weight);
 
 void Send_Card_ID_To_PC(uint8_t *uid);
 // Các hàm Driver HX711
@@ -160,17 +175,17 @@ int main(void)
     // Khởi tạo thẻ RFID RC522
     RC522_Init();
 
-    HAL_UART_Transmit(&huart1, (uint8_t *)"Scanning I2C Bus...\r\n", 21, 100);
+    //HAL_UART_Transmit(&huart1, (uint8_t *)"Scanning I2C Bus...\r\n", 21, 100);
     for (uint8_t i = 0; i < 255; i++)
     {
         if (HAL_I2C_IsDeviceReady(&hi2c1, i, 1, 10) == HAL_OK)
         {
             char msg[30];
-            sprintf(msg, "Found device at: 0x%02X\r\n", i);
-            HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
+//            sprintf(msg, "Found device at: 0x%02X\r\n", i);
+//            HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
         }
     }
-    HAL_UART_Transmit(&huart1, (uint8_t *)"Scan complete.\r\n", 16, 100);
+    //HAL_UART_Transmit(&huart1, (uint8_t *)"Scan complete.\r\n", 16, 100);
 
     // Đợi mạch ổn định rồi mới lấy mẫu Tare (Zero)
     HAL_Delay(500);
@@ -204,40 +219,45 @@ int main(void)
     	        // --- PHẦN ĐỌC THẺ RFID (Vẫn phải quét liên tục để nhạy thẻ) ---
     	        // Chúng ta đưa phần đọc RFID ra ngoài điều kiện 5s để người dùng
     	        // quẹt thẻ là nhận ngay lập tức, không bị trễ 5 giây.
-    	        static uint32_t last_card_detect_time = 0;
-    	        uint8_t just_scanned = 0;
+    	// --- PHẦN ĐỌC THẺ RFID ---
+    	static uint32_t last_card_detect_time = 0;
 
-    	        if (RC522_CheckCard(card_uid) == 0)
+//    	if (RC522_CheckCard(card_uid) == 0) // Có thẻ
+//    	{
+//    	    is_card_detected = 1;
+//    	    last_card_detect_time = HAL_GetTick(); // Cập nhật mốc thời gian mới nhất
+//
+//    	    Send_Card_ID_To_PC(card_uid);
+//    	    Display_Data_On_OLED(current_weight, card_uid);
+//    	    HAL_Delay(300);
+//    	}
+    	// Sửa trong vòng lặp while(1)
+    	if (RC522_CheckCard(card_uid) == 0)
+    	{
+    	    is_card_detected = 1;
+    	    last_card_detect_time = HAL_GetTick();
+
+    	    // Thay vì chỉ Send_Card_ID, hãy gọi hàm log mới
+    	    Update_And_Log_History(card_uid, current_weight);
+
+    	    Display_Data_On_OLED(current_weight, card_uid);
+    	    HAL_Delay(500); // Tăng delay để tránh log tràn liên tục
+    	}
+    	else // Không có thẻ
+    	{
+    	    // Kiểm tra nếu đã quá 2 giây kể từ lần cuối thấy thẻ
+    	    if (HAL_GetTick() - last_card_detect_time > 2000)
+    	    {
+    	        if (is_card_detected == 1)
     	        {
-    	            is_card_detected = 1;
-    	            just_scanned = 1;
-    	            last_card_detect_time = HAL_GetTick();
-
-    	            // Nếu có thẻ mới quét, gửi ID lên Hercules ngay lập tức
-    	            Send_Card_ID_To_PC(card_uid);
-
-    	            // Cập nhật OLED hiển thị ID thẻ mới ngay mà không đợi hết 5s
+    	            is_card_detected = 0;
+    	            // XÓA DỮ LIỆU NGAY TẠI ĐÂY
+    	            memset(card_uid, 0, 5);
     	            Display_Data_On_OLED(current_weight, card_uid);
+    	        }
+    	    }
+    	}
 
-    	            // Trễ nhẹ một chút để tránh quét trùng lặp liên tục một thẻ
-    	            HAL_Delay(300);
-    	        }
-    	        else
-    	        {
-    	            // Giữ trạng thái hiển thị ID thẻ trong vòng 2 giây sau khi rút thẻ ra
-    	            if (HAL_GetTick() - last_card_detect_time > 2000)
-    	            {
-    	                if (is_card_detected == 1) // Chỉ cập nhật lại màn hình khi trạng thái thay đổi
-    	                {
-    	                    is_card_detected = 0;
-    	                    card_uid[0] = 0;
-    	                    card_uid[1] = 0;
-    	                    card_uid[2] = 0;
-    	                    card_uid[3] = 0;
-    	                    Display_Data_On_OLED(current_weight, card_uid);
-    	                }
-    	            }
-    	        }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -380,16 +400,10 @@ static void MX_RTC_Init(void)
   }
 
   /* USER CODE BEGIN Check_RTC_BKUP */
-    if (HAL_RTCEx_BKUPRead(&hrtc, RTC_BKP_DR1) == 0x32F2)
-    {
-        return; // Khởi tạo xong, giữ nguyên thời gian từ PIN VBAT, thoát hàm
-    }
   /* USER CODE END Check_RTC_BKUP */
 
-  /** Initialize RTC and set the Time and Date
-  */
-  sTime.Hours = 0x0;
-  sTime.Minutes = 0x0;
+  sTime.Hours = 0x10;
+  sTime.Minutes = 0x32;
   sTime.Seconds = 0x0;
   sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
   sTime.StoreOperation = RTC_STOREOPERATION_RESET;
@@ -397,9 +411,9 @@ static void MX_RTC_Init(void)
   {
     Error_Handler();
   }
-  sDate.WeekDay = RTC_WEEKDAY_MONDAY;
+  sDate.WeekDay = RTC_WEEKDAY_THURSDAY;
   sDate.Month = RTC_MONTH_JULY;
-  sDate.Date = 0x1;
+  sDate.Date = 0x16;
   sDate.Year = 0x26;
 
   if (HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BCD) != HAL_OK)
@@ -592,6 +606,64 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+//
+
+void Update_And_Log_History(uint8_t *uid, float new_weight) {
+    if (new_weight < 0.01f) return;
+
+    RTC_TimeTypeDef sTime = {0};
+        RTC_DateTypeDef sDate = {0};
+        HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+        HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+
+    // 1. Nếu là thẻ mới hoàn toàn (thẻ khác), mới reset lịch sử
+    if (memcmp(current_card_log.uid, uid, 4) != 0) {
+        memcpy(current_card_log.uid, uid, 4);
+        current_card_log.count = 0;
+        for(int i=0; i<3; i++) current_card_log.weight_history[i] = 0.0f;
+    }
+
+    // 2. Chống lặp: Chỉ lưu nếu giá trị khác với bản ghi cuối cùng đã lưu
+    if (current_card_log.count > 0 && current_card_log.weight_history[current_card_log.count - 1] == new_weight)
+        return;
+
+    if (current_card_log.count == 3) {
+            for (int i = 0; i < 2; i++) {
+                current_card_log.weight_history[i] = current_card_log.weight_history[i + 1];
+                current_card_log.time_history[i] = current_card_log.time_history[i + 1];
+            }
+            // Ghi bản ghi mới vào vị trí cuối (index 2)
+            current_card_log.weight_history[2] = new_weight;
+            current_card_log.time_history[2] = (TimeStamp_t){sDate.Date, sDate.Month, sDate.Year, sTime.Hours, sTime.Minutes, sTime.Seconds};
+        } else {
+            // Ghi vào vị trí tiếp theo nếu count < 3
+            int idx = current_card_log.count;
+            current_card_log.weight_history[idx] = new_weight;
+            current_card_log.time_history[idx] = (TimeStamp_t){sDate.Date, sDate.Month, sDate.Year, sTime.Hours, sTime.Minutes, sTime.Seconds};
+            current_card_log.count++;
+        }
+
+    // 4. In ra 3 bản ghi hiện có
+    sprintf(uart_tx_buffer, "\r\n--- History (UID: %02X%02X%02X%02X) ---\r\n",
+            uid[0], uid[1], uid[2], uid[3]);
+    HAL_UART_Transmit(&huart1, (uint8_t *)uart_tx_buffer, strlen(uart_tx_buffer), 100);
+
+    for (int i = 0; i < current_card_log.count; i++) {
+        int32_t h_int = (int32_t)current_card_log.weight_history[i];
+        int32_t h_frac = (int32_t)((current_card_log.weight_history[i] - (float)h_int) * 100.0f);
+        if (h_frac < 0) h_frac = -h_frac;
+
+        sprintf(uart_tx_buffer, "%d: %ld.%02ld kg | %02d:%02d:%02d - %02d/%02d/20%02d\r\n",
+                i + 1, h_int, h_frac,
+                current_card_log.time_history[i].hour,
+                current_card_log.time_history[i].minute,
+                current_card_log.time_history[i].second,
+                current_card_log.time_history[i].day,
+                current_card_log.time_history[i].month,
+                current_card_log.time_history[i].year);
+        HAL_UART_Transmit(&huart1, (uint8_t *)uart_tx_buffer, strlen(uart_tx_buffer), 100);
+    }
+}
 
 // ==========================================
 // DRIVER NGOẠI VI 1: CẢM BIẾN TRỌNG LƯỢNG HX711
@@ -857,7 +929,7 @@ uint8_t RC522_CheckCard(uint8_t *id)
     status = RC522_ToCard(PCD_TRANSCEIVE, buf, 2, buf, &len);
     if (status != 0)
     {
-        HAL_UART_Transmit(&huart1, (uint8_t *)"[DEBUG] ANTI Failed\r\n", 21, 100);
+        //HAL_UART_Transmit(&huart1, (uint8_t *)"[DEBUG] ANTI Failed\r\n", 21, 100);
         return 1;
     }
 
@@ -870,9 +942,9 @@ uint8_t RC522_CheckCard(uint8_t *id)
     }
     if (bcc != buf[4])
     {
-        sprintf(uart_tx_buffer, "[DEBUG] BCC Fail: %02X %02X %02X %02X -> BCC=%02X (calc=%02X)\r\n",
-                buf[0], buf[1], buf[2], buf[3], buf[4], bcc);
-        HAL_UART_Transmit(&huart1, (uint8_t *)uart_tx_buffer, strlen(uart_tx_buffer), 100);
+//        sprintf(uart_tx_buffer, "[DEBUG] BCC Fail: %02X %02X %02X %02X -> BCC=%02X (calc=%02X)\r\n",
+//                buf[0], buf[1], buf[2], buf[3], buf[4], bcc);
+//        HAL_UART_Transmit(&huart1, (uint8_t *)uart_tx_buffer, strlen(uart_tx_buffer), 100);
         return 1;
     }
 
@@ -896,20 +968,26 @@ void Send_Data_To_PC(float weight)
     HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
 
     sprintf(uart_tx_buffer,
-            "{\r\n  \"uid\": \"%02X%02X%02X%02X\",\r\n  \"weight\": %ld.%02ld,\r\n  \"time\": \"20%02d-%02d-%02d %02d:%02d:%02d\",\r\n  \"raw_val\": %ld,\r\n  \"offset\": %ld\r\n}\r\n",
+            "{\r\n  \"uid\": \"%02X%02X%02X%02X\",\r\n  \"weight\": %ld.%02ld,\r\n }\r\n",
             card_uid[0], card_uid[1], card_uid[2], card_uid[3],
-            w_int, w_frac,
-            sDate.Year, sDate.Month, sDate.Date,
-            sTime.Hours, sTime.Minutes, sTime.Seconds,
-            current_raw_val, sample_offset);
+            w_int, w_frac);
 
-    HAL_UART_Transmit(&huart1, (uint8_t *)uart_tx_buffer, strlen(uart_tx_buffer), 1000);
+    if (is_card_detected == 0) {
+            sprintf(uart_tx_buffer, "{\r\n  \"uid\": \"00000000\",\r\n  \"weight\": %ld.%02ld,\r\n }\r\n",
+                    w_int, w_frac);
+        } else {
+            sprintf(uart_tx_buffer, "{\r\n  \"uid\": \"%02X%02X%02X%02X\",\r\n  \"weight\": %ld.%02ld,\r\n }\r\n",
+                    card_uid[0], card_uid[1], card_uid[2], card_uid[3], w_int, w_frac);
+        }
+
+        HAL_UART_Transmit(&huart1, (uint8_t *)uart_tx_buffer, strlen(uart_tx_buffer), 1000);
+
 }
 void Send_Card_ID_To_PC(uint8_t *uid)
 {
-    sprintf(uart_tx_buffer, "\r\n[INFO] Card Detected! ID: %02X%02X%02X%02X\r\n",
-            uid[0], uid[1], uid[2], uid[3]);
-    HAL_UART_Transmit(&huart1, (uint8_t *)uart_tx_buffer, strlen(uart_tx_buffer), 1000);
+//    sprintf(uart_tx_buffer, "\r\n[INFO] Card Detected! ID: %02X%02X%02X%02X\r\n",
+//            uid[0], uid[1], uid[2], uid[3]);
+//    HAL_UART_Transmit(&huart1, (uint8_t *)uart_tx_buffer, strlen(uart_tx_buffer), 1000);
 }
 
 void Display_Data_On_OLED(float weight, uint8_t *uid)
@@ -920,7 +998,7 @@ void Display_Data_On_OLED(float weight, uint8_t *uid)
 
     // Lời chào
     SSD1306_GotoXY(0, 0);
-    SSD1306_Puts("Xin chao !", &Font_7x10, SSD1306_COLOR_WHITE);
+    //SSD1306_Puts("Xin chao !", &Font_7x10, SSD1306_COLOR_WHITE);
 
     // Hiển thị Cân Nặng (Tách số thực thành 2 phần nguyên để in, tránh lỗi %f)
     int32_t w_int = (int32_t)weight;
