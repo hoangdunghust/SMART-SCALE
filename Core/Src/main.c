@@ -184,48 +184,60 @@ int main(void)
 
     while (1)
     {
-        if (HAL_GetTick() - last_update > 500)
-        {
-            last_update = HAL_GetTick();
+    	if (HAL_GetTick() - last_update >= 5000)
+    	        {
+    	            last_update = HAL_GetTick();
 
-            // 1. Đọc dữ liệu cân nặng
-            current_weight = HX711_GetWeight();
+    	            // 1. Đọc dữ liệu cân nặng (chỉ thực hiện đúng 5s một lần)
+    	            current_weight = HX711_GetWeight();
 
-            // 2. Cập nhật dữ liệu cho buffer LED 7 thanh (LED sẽ tự động được quét mượt mà bởi SysTick_Handler)
-            Update_LED_Buffer(current_weight);
+    	            // 2. Cập nhật dữ liệu cho buffer LED 7 thanh
+    	            Update_LED_Buffer(current_weight);
 
-            // 3. Đọc thẻ RFID
-            static uint32_t last_card_detect_time = 0;
-            uint8_t just_scanned = 0;
-            if (RC522_CheckCard(card_uid) == 0)
-            {
-                is_card_detected = 1;
-                just_scanned = 1;
-                last_card_detect_time = HAL_GetTick();
-            }
-            else
-            {
-                // Bỏ qua nhiễu/lỗi của mạch fake: Giữ ID trên màn hình thêm 2 giây trước khi xóa
-                if (HAL_GetTick() - last_card_detect_time > 2000)
-                {
-                    is_card_detected = 0;
-                    card_uid[0] = 0;
-                    card_uid[1] = 0;
-                    card_uid[2] = 0;
-                    card_uid[3] = 0;
-                }
-            }
+    	            // 3. Cập nhật màn hình OLED (chỉ vẽ lại sau mỗi 5s, giúp OLED bền và không bị nháy)
+    	            Display_Data_On_OLED(current_weight, card_uid);
 
-            // 4. Cập nhật màn hình OLED
-            Display_Data_On_OLED(current_weight, card_uid);
+    	            // 4. Gửi dữ liệu đóng gói JSON qua UART lên Hercules
+    	            Send_Data_To_PC(current_weight);
+    	        }
 
-            // 5. Gửi dữ liệu qua UART
-            Send_Data_To_PC(current_weight);
-            if (just_scanned)
-            {
-                Send_Card_ID_To_PC(card_uid);
-            }
-        }
+    	        // --- PHẦN ĐỌC THẺ RFID (Vẫn phải quét liên tục để nhạy thẻ) ---
+    	        // Chúng ta đưa phần đọc RFID ra ngoài điều kiện 5s để người dùng
+    	        // quẹt thẻ là nhận ngay lập tức, không bị trễ 5 giây.
+    	        static uint32_t last_card_detect_time = 0;
+    	        uint8_t just_scanned = 0;
+
+    	        if (RC522_CheckCard(card_uid) == 0)
+    	        {
+    	            is_card_detected = 1;
+    	            just_scanned = 1;
+    	            last_card_detect_time = HAL_GetTick();
+
+    	            // Nếu có thẻ mới quét, gửi ID lên Hercules ngay lập tức
+    	            Send_Card_ID_To_PC(card_uid);
+
+    	            // Cập nhật OLED hiển thị ID thẻ mới ngay mà không đợi hết 5s
+    	            Display_Data_On_OLED(current_weight, card_uid);
+
+    	            // Trễ nhẹ một chút để tránh quét trùng lặp liên tục một thẻ
+    	            HAL_Delay(300);
+    	        }
+    	        else
+    	        {
+    	            // Giữ trạng thái hiển thị ID thẻ trong vòng 2 giây sau khi rút thẻ ra
+    	            if (HAL_GetTick() - last_card_detect_time > 2000)
+    	            {
+    	                if (is_card_detected == 1) // Chỉ cập nhật lại màn hình khi trạng thái thay đổi
+    	                {
+    	                    is_card_detected = 0;
+    	                    card_uid[0] = 0;
+    	                    card_uid[1] = 0;
+    	                    card_uid[2] = 0;
+    	                    card_uid[3] = 0;
+    	                    Display_Data_On_OLED(current_weight, card_uid);
+    	                }
+    	            }
+    	        }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -681,6 +693,10 @@ float HX711_GetWeight(void)
     {
         return 0.0f;
     }
+    if (new_weight < 0.01f)
+        {
+            return 0.0f;
+        }
 
     return new_weight;
 }
@@ -828,7 +844,7 @@ uint8_t RC522_CheckCard(uint8_t *id)
     status = RC522_ToCard(PCD_TRANSCEIVE, buf, 1, buf, &len);
     if (status != 0)
     {
-        HAL_UART_Transmit(&huart1, (uint8_t *)"[DEBUG] WUPA Failed\r\n", 21, 100);
+        //HAL_UART_Transmit(&huart1, (uint8_t *)"[DEBUG] WUPA Failed\r\n", 21, 100);
         return 1;
     }
 
