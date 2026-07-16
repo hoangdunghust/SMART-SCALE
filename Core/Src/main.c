@@ -24,7 +24,6 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define DS3231_ADDRESS (0xD0)
-// HỆ SỐ CÂN ĐÃ ĐƯỢC CĂN CHỈNH: Trọng lượng thật 50g mà hiện 0.18kg => Hệ số mới = 210000 * (0.18 / 0.05) = 756000.0f
 #define HX711_SCALE 94000.0f
 #define MAX_LEN 16 // Định nghĩa kích thước đệm cho RFID
 
