@@ -24,7 +24,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define DS3231_ADDRESS (0xD0)
-#define HX711_SCALE 94000.0f
+#define HX711_SCALE 84000.0f
 #define MAX_LEN 16 // Định nghĩa kích thước đệm cho RFID
 
 // Lệnh điều khiển RFID RC522 thông qua thanh ghi cơ bản
@@ -184,7 +184,6 @@ int main(void)
 //            HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
         }
     }
-    //HAL_UART_Transmit(&huart1, (uint8_t *)"Scan complete.\r\n", 16, 100);
 
     // Đợi mạch ổn định rồi mới lấy mẫu Tare (Zero)
     HAL_Delay(500);
@@ -221,22 +220,11 @@ int main(void)
     	// --- PHẦN ĐỌC THẺ RFID ---
     	static uint32_t last_card_detect_time = 0;
 
-//    	if (RC522_CheckCard(card_uid) == 0) // Có thẻ
-//    	{
-//    	    is_card_detected = 1;
-//    	    last_card_detect_time = HAL_GetTick(); // Cập nhật mốc thời gian mới nhất
-//
-//    	    Send_Card_ID_To_PC(card_uid);
-//    	    Display_Data_On_OLED(current_weight, card_uid);
-//    	    HAL_Delay(300);
-//    	}
-    	// Sửa trong vòng lặp while(1)
     	if (RC522_CheckCard(card_uid) == 0)
     	{
     	    is_card_detected = 1;
     	    last_card_detect_time = HAL_GetTick();
 
-    	    // Thay vì chỉ Send_Card_ID, hãy gọi hàm log mới
     	    Update_And_Log_History(card_uid, current_weight);
 
     	    Display_Data_On_OLED(current_weight, card_uid);
@@ -250,7 +238,6 @@ int main(void)
     	        if (is_card_detected == 1)
     	        {
     	            is_card_detected = 0;
-    	            // XÓA DỮ LIỆU NGAY TẠI ĐÂY
     	            memset(card_uid, 0, 5);
     	            Display_Data_On_OLED(current_weight, card_uid);
     	        }
@@ -821,12 +808,12 @@ void RC522_Init(void)
     RC522_WriteReg(0x2D, 30);
     RC522_WriteReg(0x2C, 0);
 
-    // 🔥 RF CONFIG (QUAN TRỌNG)
+    // RF CONFIG
     RC522_WriteReg(0x14, 0x8D); // TxControl
     RC522_WriteReg(0x11, 0x3D); // Mode
-    RC522_WriteReg(0x26, 0x70); // RFCfgReg: Set RxGain to 48dB (Bắt buộc cho mạch fake 0x82)
+    RC522_WriteReg(0x26, 0x70); // RFCfgReg: Set RxGain to 48dB
 
-    // 🔥 BẬT ANTEN
+    // BẬT ANTEN
     uint8_t val = RC522_ReadReg(0x14);
     RC522_WriteReg(0x14, val | 0x03);
 
@@ -941,9 +928,6 @@ uint8_t RC522_CheckCard(uint8_t *id)
     }
     if (bcc != buf[4])
     {
-//        sprintf(uart_tx_buffer, "[DEBUG] BCC Fail: %02X %02X %02X %02X -> BCC=%02X (calc=%02X)\r\n",
-//                buf[0], buf[1], buf[2], buf[3], buf[4], bcc);
-//        HAL_UART_Transmit(&huart1, (uint8_t *)uart_tx_buffer, strlen(uart_tx_buffer), 100);
         return 1;
     }
 
