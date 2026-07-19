@@ -30,9 +30,9 @@
 #define PIN_7SEG_P		GPIO_PIN_15
 
 #define PORT_7SEG_CONTROL0		GPIOG
-#define PIN_7SEG_CONTROL0		GPIO_PIN_2
+#define PIN_7SEG_CONTROL0		GPIO_PIN_4
 #define PORT_7SEG_CONTROL1		GPIOG
-#define PIN_7SEG_CONTROL1		GPIO_PIN_3
+#define PIN_7SEG_CONTROL1		GPIO_PIN_5
 
 void Set7SegDisplayValue(int val);
 void Run7SegDisplay();

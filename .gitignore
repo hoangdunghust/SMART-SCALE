@@ -1,11 +1,23 @@
-# Các thư mục được sinh ra tự động, không cần đẩy lên
+# STM32CubeIDE build files
 Debug/
 Release/
-.settings/
-*.launch
-*.map
+
+# Object files
 *.o
 *.d
 *.elf
-*.bin
+*.map
 *.hex
+*.bin
+
+# CubeIDE metadata
+.metadata/
+.settings/
+
+# Temporary files
+*.tmp
+*.log
+
+# Backup
+*.bak
+*~

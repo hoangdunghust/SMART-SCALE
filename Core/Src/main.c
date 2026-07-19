@@ -15,6 +15,12 @@
 #include <string.h>
 #include <math.h>
 #include "SSD1306.h"
+#include "ds1307.h"
+#include "eeprom.h"
+#include "7seg.h"
+#include "user.h"
+#include "history.h"
+// #include "7seg.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -37,6 +43,10 @@
 #define FIFODataReg 0x09
 #define FIFOLengthReg 0x0A
 #define BitFramingReg 0x0D
+#define SEND_HISTORY 5
+
+#define MAX_HISTORY 5
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -46,9 +56,9 @@
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
-RTC_HandleTypeDef hrtc;
-
 SPI_HandleTypeDef hspi1;
+
+TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart1;
 
@@ -74,23 +84,24 @@ uint8_t rtc_day, rtc_date, rtc_month, rtc_year;
 char uart_tx_buffer[256];
 
 // Mảng mã LED 7 đoạn cho Anode chung
-uint8_t LED_CA_CODE[] = {0xC0, 0xCF, 0xA4, 0x86, 0x8B, 0x92, 0x90, 0xC7, 0x80, 0x82};
+uint8_t LED_CA_CODE[] = {
+    0xC0, // 0
+    0xF9, // 1
+    0xA4, // 2
+    0xB0, // 3
+    0x99, // 4
+    0x92, // 5
+    0x82, // 6
+    0xF8, // 7
+    0x80, // 8
+    0x90  // 9
+};
 // Mảng lưu dữ liệu hiển thị hiện tại cho 2 LED (mặc định tắt - 0xFF)
 uint8_t display_digits[2] = {0xFF, 0xFF};
 
-typedef struct {
-    uint8_t day, month, year;
-    uint8_t hour, minute, second;
-} TimeStamp_t;
 
-typedef struct {
-    uint8_t uid[4];
-    float weight_history[3];
-    TimeStamp_t time_history[3]; // Lưu thời gian tương ứng cho 3 lần cân
-    uint8_t count;
-} CardHistory_t;
+UserProfile_t users[MAX_USER];
 
-CardHistory_t current_card_log = {0};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -99,11 +110,9 @@ static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
-static void MX_RTC_Init(void);
-
+static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
 
-void Update_And_Log_History(uint8_t *uid, float new_weight);
 
 void Send_Card_ID_To_PC(uint8_t *uid);
 // Các hàm Driver HX711
@@ -129,6 +138,14 @@ void Send_Data_To_PC(float weight);
 void Update_LED_Buffer(float weight);
 void LED_Scan_Routine(void);
 void Display_Data_On_OLED(float weight, uint8_t *uid);
+void Send_History_To_PC(uint8_t *uid, float latest_weight);
+void Read_History(LogEntry_t *logs, uint8_t number);
+int Find_User(uint8_t *uid);
+float HX711_GetStableWeight(void);
+
+void Add_History(int user_id,float weight);
+
+void Send_History_To_PC(uint8_t *uid,float weight);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -136,52 +153,66 @@ void Display_Data_On_OLED(float weight, uint8_t *uid);
 /* USER CODE END 0 */
 
 /**
-  * @brief  The application entry point.
-  * @retval int
-  */
+ * @brief  The application entry point.
+ * @retval int
+ */
 int main(void)
 {
 
-  /* USER CODE BEGIN 1 */
-  /* USER CODE END 1 */
+    /* USER CODE BEGIN 1 */
+    /* USER CODE END 1 */
 
-  /* MCU Configuration--------------------------------------------------------*/
+    /* MCU Configuration--------------------------------------------------------*/
 
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-  HAL_Init();
+    /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+    HAL_Init();
 
-  /* USER CODE BEGIN Init */
+    /* USER CODE BEGIN Init */
 
-  /* USER CODE END Init */
+    /* USER CODE END Init */
 
-  /* Configure the system clock */
-  SystemClock_Config();
+    /* Configure the system clock */
+    SystemClock_Config();
 
-  /* USER CODE BEGIN SysInit */
+    /* USER CODE BEGIN SysInit */
 
-  /* USER CODE END SysInit */
+    /* USER CODE END SysInit */
 
-  /* Initialize all configured peripherals */
-  MX_GPIO_Init();
-  MX_I2C1_Init();
-  MX_SPI1_Init();
-  MX_USART1_UART_Init();
-  MX_RTC_Init();
-  /* USER CODE BEGIN 2 */
+    /* Initialize all configured peripherals */
+    MX_GPIO_Init();
+    MX_I2C1_Init();
+    MX_SPI1_Init();
+    MX_USART1_UART_Init();
+    MX_TIM6_Init();
+    /* USER CODE BEGIN 2 */
+    HAL_TIM_Base_Start_IT(&htim6);
+    // Chèn vào đầu hàm main sau khi khởi tạo I2C
+    for (uint8_t i = 0; i < 127; i++)
+    {
+        if (HAL_I2C_IsDeviceReady(&hi2c1, i << 1, 1, 10) == HAL_OK)
+        {
+            char msg[20];
+            sprintf(msg, "Found: 0x%02X\r\n", i);
+            HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
+        }
+    }
+    // Cập nhật đúng thời gian thực: 19/07/2026, 16:20:00
+    DS1307_Time now = {0, 20, 16, 1, 19, 7, 26};
+    DS1307_SetTime(&now);
     // Khởi tạo Màn hình OLED
     SSD1306_Init();
 
     // Khởi tạo thẻ RFID RC522
     RC522_Init();
 
-    //HAL_UART_Transmit(&huart1, (uint8_t *)"Scanning I2C Bus...\r\n", 21, 100);
+    // HAL_UART_Transmit(&huart1, (uint8_t *)"Scanning I2C Bus...\r\n", 21, 100);
     for (uint8_t i = 0; i < 255; i++)
     {
         if (HAL_I2C_IsDeviceReady(&hi2c1, i, 1, 10) == HAL_OK)
         {
             char msg[30];
-//            sprintf(msg, "Found device at: 0x%02X\r\n", i);
-//            HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
+            //            sprintf(msg, "Found device at: 0x%02X\r\n", i);
+            //            HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
         }
     }
 
@@ -189,309 +220,285 @@ int main(void)
     HAL_Delay(500);
     HX711_Tare();
 
-  /* USER CODE END 2 */
+    /* USER CODE END 2 */
 
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
+    /* Infinite loop */
+    /* USER CODE BEGIN WHILE */
     uint32_t last_update = 0;
 
     while (1)
     {
-    	if (HAL_GetTick() - last_update >= 5000)
-    	        {
-    	            last_update = HAL_GetTick();
 
-    	            // 1. Đọc dữ liệu cân nặng (chỉ thực hiện đúng 5s một lần)
-    	            current_weight = HX711_GetWeight();
+        // cập nhật cân, LED, OLED
+        if(HAL_GetTick()-last_update>=5000)
+        {
+            last_update=HAL_GetTick();
 
-    	            // 2. Cập nhật dữ liệu cho buffer LED 7 thanh
-    	            Update_LED_Buffer(current_weight);
+            current_weight=HX711_GetWeight();
 
-    	            // 3. Cập nhật màn hình OLED (chỉ vẽ lại sau mỗi 5s, giúp OLED bền và không bị nháy)
-    	            Display_Data_On_OLED(current_weight, card_uid);
+            Update_LED_Buffer(current_weight);
 
-    	            // 4. Gửi dữ liệu đóng gói JSON qua UART lên Hercules
-    	            Send_Data_To_PC(current_weight);
-    	        }
+            Display_Data_On_OLED(current_weight,card_uid);
+        }
 
-    	        // --- PHẦN ĐỌC THẺ RFID (Vẫn phải quét liên tục để nhạy thẻ) ---
-    	        // Chúng ta đưa phần đọc RFID ra ngoài điều kiện 5s để người dùng
-    	        // quẹt thẻ là nhận ngay lập tức, không bị trễ 5 giây.
-    	// --- PHẦN ĐỌC THẺ RFID ---
-    	static uint32_t last_card_detect_time = 0;
+        // --- PHẦN ĐỌC THẺ RFID ---
+        static uint32_t last_card_detect_time = 0;
 
-    	if (RC522_CheckCard(card_uid) == 0)
-    	{
-    	    is_card_detected = 1;
-    	    last_card_detect_time = HAL_GetTick();
+        if(RC522_CheckCard(card_uid)==0)
+        {
 
-    	    Update_And_Log_History(card_uid, current_weight);
+            int user_id;
 
-    	    Display_Data_On_OLED(current_weight, card_uid);
-    	    HAL_Delay(500); // Tăng delay để tránh log tràn liên tục
-    	}
-    	else // Không có thẻ
-    	{
-    	    // Kiểm tra nếu đã quá 2 giây kể từ lần cuối thấy thẻ
-    	    if (HAL_GetTick() - last_card_detect_time > 2000)
-    	    {
-    	        if (is_card_detected == 1)
-    	        {
-    	            is_card_detected = 0;
-    	            memset(card_uid, 0, 5);
-    	            Display_Data_On_OLED(current_weight, card_uid);
-    	        }
-    	    }
-    	}
 
-    /* USER CODE END WHILE */
+            user_id = Find_User(card_uid);
 
-    /* USER CODE BEGIN 3 */
+
+            if(user_id <0)
+            {
+                user_id = Create_User(card_uid);
+            }
+
+
+            HAL_Delay(2000);
+
+
+            current_weight = HX711_GetStableWeight();
+
+
+            Add_History(
+                user_id,
+                current_weight
+            );
+
+
+            Send_History_To_PC(
+                    card_uid,
+                    current_weight
+            );
+
+
+        }
+
+        /* USER CODE END WHILE */
     }
-  /* USER CODE END 3 */
+        /* USER CODE BEGIN 3 */
+
+    /* USER CODE END 3 */
 }
 
 /**
-  * @brief System Clock Configuration
-  * @retval None
-  */
+ * @brief System Clock Configuration
+ * @retval None
+ */
 void SystemClock_Config(void)
 {
-  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Configure the main internal regulator output voltage
-  */
-  __HAL_RCC_PWR_CLK_ENABLE();
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+    /** Configure the main internal regulator output voltage
+     */
+    __HAL_RCC_PWR_CLK_ENABLE();
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = 4;
-  RCC_OscInitStruct.PLL.PLLN = 180;
-  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = 4;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
-  {
-    Error_Handler();
-  }
+    /** Initializes the RCC Oscillators according to the specified parameters
+     * in the RCC_OscInitTypeDef structure.
+     */
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+    RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+    RCC_OscInitStruct.PLL.PLLM = 4;
+    RCC_OscInitStruct.PLL.PLLN = 180;
+    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+    RCC_OscInitStruct.PLL.PLLQ = 4;
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+    {
+        Error_Handler();
+    }
 
-  /** Activate the Over-Drive mode
-  */
-  if (HAL_PWREx_EnableOverDrive() != HAL_OK)
-  {
-    Error_Handler();
-  }
+    /** Activate the Over-Drive mode
+     */
+    if (HAL_PWREx_EnableOverDrive() != HAL_OK)
+    {
+        Error_Handler();
+    }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV4;
+    /** Initializes the CPU, AHB and APB buses clocks
+     */
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV4;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
-  {
-    Error_Handler();
-  }
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
+    {
+        Error_Handler();
+    }
 }
 
 /**
-  * @brief I2C1 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief I2C1 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_I2C1_Init(void)
 {
 
-  /* USER CODE BEGIN I2C1_Init 0 */
+    /* USER CODE BEGIN I2C1_Init 0 */
 
-  /* USER CODE END I2C1_Init 0 */
+    /* USER CODE END I2C1_Init 0 */
 
-  /* USER CODE BEGIN I2C1_Init 1 */
+    /* USER CODE BEGIN I2C1_Init 1 */
 
-  /* USER CODE END I2C1_Init 1 */
-  hi2c1.Instance = I2C1;
-  hi2c1.Init.ClockSpeed = 400000;
-  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
-  hi2c1.Init.OwnAddress1 = 0;
-  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c1.Init.OwnAddress2 = 0;
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
-  {
-    Error_Handler();
-  }
+    /* USER CODE END I2C1_Init 1 */
+    hi2c1.Instance = I2C1;
+    hi2c1.Init.ClockSpeed = 100000;
+    hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+    hi2c1.Init.OwnAddress1 = 0;
+    hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+    hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+    hi2c1.Init.OwnAddress2 = 0;
+    hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+    hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+    if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+    {
+        Error_Handler();
+    }
 
-  /** Configure Analogue filter
-  */
-  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
-  {
-    Error_Handler();
-  }
+    /** Configure Analogue filter
+     */
+    if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
+    {
+        Error_Handler();
+    }
 
-  /** Configure Digital filter
-  */
-  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN I2C1_Init 2 */
+    /** Configure Digital filter
+     */
+    if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
+    {
+        Error_Handler();
+    }
+    /* USER CODE BEGIN I2C1_Init 2 */
 
-  /* USER CODE END I2C1_Init 2 */
-
+    /* USER CODE END I2C1_Init 2 */
 }
 
 /**
-  * @brief RTC Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_RTC_Init(void)
-{
-
-  /* USER CODE BEGIN RTC_Init 0 */
-
-  /* USER CODE END RTC_Init 0 */
-
-  RTC_TimeTypeDef sTime = {0};
-  RTC_DateTypeDef sDate = {0};
-
-  /* USER CODE BEGIN RTC_Init 1 */
-
-  /* USER CODE END RTC_Init 1 */
-
-  /** Initialize RTC Only
-  */
-  hrtc.Instance = RTC;
-  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
-  hrtc.Init.AsynchPrediv = 127;
-  hrtc.Init.SynchPrediv = 255;
-  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
-  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
-  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
-  if (HAL_RTC_Init(&hrtc) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /* USER CODE BEGIN Check_RTC_BKUP */
-  /* USER CODE END Check_RTC_BKUP */
-
-  sTime.Hours = 0x10;
-  sTime.Minutes = 0x32;
-  sTime.Seconds = 0x0;
-  sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
-  sTime.StoreOperation = RTC_STOREOPERATION_RESET;
-  if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BCD) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sDate.WeekDay = RTC_WEEKDAY_THURSDAY;
-  sDate.Month = RTC_MONTH_JULY;
-  sDate.Date = 0x16;
-  sDate.Year = 0x26;
-
-  if (HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BCD) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN RTC_Init 2 */
-    HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR1, 0x32F2); // Lưu cờ đánh dấu đã cài đặt ngày giờ
-  /* USER CODE END RTC_Init 2 */
-
-}
-
-/**
-  * @brief SPI1 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief SPI1 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_SPI1_Init(void)
 {
 
-  /* USER CODE BEGIN SPI1_Init 0 */
+    /* USER CODE BEGIN SPI1_Init 0 */
 
-  /* USER CODE END SPI1_Init 0 */
+    /* USER CODE END SPI1_Init 0 */
 
-  /* USER CODE BEGIN SPI1_Init 1 */
+    /* USER CODE BEGIN SPI1_Init 1 */
 
-  /* USER CODE END SPI1_Init 1 */
-  /* SPI1 parameter configuration*/
-  hspi1.Instance = SPI1;
-  hspi1.Init.Mode = SPI_MODE_MASTER;
-  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
-  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
-  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
-  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
-  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-  hspi1.Init.CRCPolynomial = 10;
-  if (HAL_SPI_Init(&hspi1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN SPI1_Init 2 */
+    /* USER CODE END SPI1_Init 1 */
+    /* SPI1 parameter configuration*/
+    hspi1.Instance = SPI1;
+    hspi1.Init.Mode = SPI_MODE_MASTER;
+    hspi1.Init.Direction = SPI_DIRECTION_2LINES;
+    hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
+    hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+    hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+    hspi1.Init.NSS = SPI_NSS_SOFT;
+    hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
+    hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
+    hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
+    hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+    hspi1.Init.CRCPolynomial = 10;
+    if (HAL_SPI_Init(&hspi1) != HAL_OK)
+    {
+        Error_Handler();
+    }
+    /* USER CODE BEGIN SPI1_Init 2 */
 
-  /* USER CODE END SPI1_Init 2 */
-
+    /* USER CODE END SPI1_Init 2 */
 }
 
 /**
-  * @brief USART1 Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief TIM6 Initialization Function
+ * @param None
+ * @retval None
+ */
+static void MX_TIM6_Init(void)
+{
+
+    /* USER CODE BEGIN TIM6_Init 0 */
+
+    /* USER CODE END TIM6_Init 0 */
+
+    TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+    /* USER CODE BEGIN TIM6_Init 1 */
+
+    /* USER CODE END TIM6_Init 1 */
+    htim6.Instance = TIM6;
+    htim6.Init.Prescaler = 179;
+    htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim6.Init.Period = 999;
+    htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+    if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
+    {
+        Error_Handler();
+    }
+    sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+    sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+    if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig) != HAL_OK)
+    {
+        Error_Handler();
+    }
+    /* USER CODE BEGIN TIM6_Init 2 */
+
+    /* USER CODE END TIM6_Init 2 */
+}
+
+/**
+ * @brief USART1 Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_USART1_UART_Init(void)
 {
 
-  /* USER CODE BEGIN USART1_Init 0 */
+    /* USER CODE BEGIN USART1_Init 0 */
 
-  /* USER CODE END USART1_Init 0 */
+    /* USER CODE END USART1_Init 0 */
 
-  /* USER CODE BEGIN USART1_Init 1 */
+    /* USER CODE BEGIN USART1_Init 1 */
 
-  /* USER CODE END USART1_Init 1 */
-  huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
-  huart1.Init.WordLength = UART_WORDLENGTH_8B;
-  huart1.Init.StopBits = UART_STOPBITS_1;
-  huart1.Init.Parity = UART_PARITY_NONE;
-  huart1.Init.Mode = UART_MODE_TX_RX;
-  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART1_Init 2 */
+    /* USER CODE END USART1_Init 1 */
+    huart1.Instance = USART1;
+    huart1.Init.BaudRate = 115200;
+    huart1.Init.WordLength = UART_WORDLENGTH_8B;
+    huart1.Init.StopBits = UART_STOPBITS_1;
+    huart1.Init.Parity = UART_PARITY_NONE;
+    huart1.Init.Mode = UART_MODE_TX_RX;
+    huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+    if (HAL_UART_Init(&huart1) != HAL_OK)
+    {
+        Error_Handler();
+    }
+    /* USER CODE BEGIN USART1_Init 2 */
 
-  /* USER CODE END USART1_Init 2 */
-
+    /* USER CODE END USART1_Init 2 */
 }
 
 /**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
+ * @brief GPIO Initialization Function
+ * @param None
+ * @retval None
+ */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    /* USER CODE BEGIN MX_GPIO_Init_1 */
 
     GPIO_InitStruct.Pin = GPIO_PIN_2;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
@@ -510,146 +517,87 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
     HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET); // Mặc định CS ở mức CAO (không chọn chip)
-  /* USER CODE END MX_GPIO_Init_1 */
+    /* USER CODE END MX_GPIO_Init_1 */
 
-  /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOE_CLK_ENABLE();
-  __HAL_RCC_GPIOH_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOD_CLK_ENABLE();
-  __HAL_RCC_GPIOG_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
+    /* GPIO Ports Clock Enable */
+    __HAL_RCC_GPIOE_CLK_ENABLE();
+    __HAL_RCC_GPIOH_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOD_CLK_ENABLE();
+    __HAL_RCC_GPIOG_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOE, HX711_SCK_Pin|GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6, GPIO_PIN_RESET);
+    /*Configure GPIO pin Output Level */
+    HAL_GPIO_WritePin(GPIOE, HX711_SCK_Pin | GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_6, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(RFID__CS_GPIO_Port, RFID__CS_Pin, GPIO_PIN_SET);
+    /*Configure GPIO pin Output Level */
+    HAL_GPIO_WritePin(RFID__CS_GPIO_Port, RFID__CS_Pin, GPIO_PIN_SET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3
-                          |GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6, GPIO_PIN_RESET);
+    /*Configure GPIO pin Output Level */
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_6, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOG, GPIO_PIN_13|GPIO_PIN_14, GPIO_PIN_RESET);
+    /*Configure GPIO pin Output Level */
+    HAL_GPIO_WritePin(GPIOG, GPIO_PIN_13 | GPIO_PIN_14, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(RFID_RST_GPIO_Port, RFID_RST_Pin, GPIO_PIN_SET);
+    /*Configure GPIO pin Output Level */
+    HAL_GPIO_WritePin(RFID_RST_GPIO_Port, RFID_RST_Pin, GPIO_PIN_SET);
 
-  /*Configure GPIO pin : HX711_DOUT_Pin */
-  GPIO_InitStruct.Pin = HX711_DOUT_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(HX711_DOUT_GPIO_Port, &GPIO_InitStruct);
+    /*Configure GPIO pin : HX711_DOUT_Pin */
+    GPIO_InitStruct.Pin = HX711_DOUT_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(HX711_DOUT_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : HX711_SCK_Pin PE6 */
-  GPIO_InitStruct.Pin = HX711_SCK_Pin|GPIO_PIN_6;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+    /*Configure GPIO pins : HX711_SCK_Pin PE6 */
+    GPIO_InitStruct.Pin = HX711_SCK_Pin | GPIO_PIN_6;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PE4 PE5 */
-  GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+    /*Configure GPIO pins : PE4 PE5 */
+    GPIO_InitStruct.Pin = GPIO_PIN_4 | GPIO_PIN_5;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : RFID__CS_Pin */
-  GPIO_InitStruct.Pin = RFID__CS_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-  HAL_GPIO_Init(RFID__CS_GPIO_Port, &GPIO_InitStruct);
+    /*Configure GPIO pin : RFID__CS_Pin */
+    GPIO_InitStruct.Pin = RFID__CS_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(RFID__CS_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PD0 PD1 PD2 PD3
-                           PD4 PD5 PD6 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3
-                          |GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+    /*Configure GPIO pins : PD0 PD1 PD2 PD3
+                             PD4 PD5 PD6 */
+    GPIO_InitStruct.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_6;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PG13 PG14 */
-  GPIO_InitStruct.Pin = GPIO_PIN_13|GPIO_PIN_14;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
+    /*Configure GPIO pins : PG13 PG14 */
+    GPIO_InitStruct.Pin = GPIO_PIN_13 | GPIO_PIN_14;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : RFID_RST_Pin */
-  GPIO_InitStruct.Pin = RFID_RST_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(RFID_RST_GPIO_Port, &GPIO_InitStruct);
+    /*Configure GPIO pin : RFID_RST_Pin */
+    GPIO_InitStruct.Pin = RFID_RST_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(RFID_RST_GPIO_Port, &GPIO_InitStruct);
 
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
+    /* USER CODE BEGIN MX_GPIO_Init_2 */
 
-  /* USER CODE END MX_GPIO_Init_2 */
+    /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-//
 
-void Update_And_Log_History(uint8_t *uid, float new_weight) {
-    if (new_weight < 0.01f) return;
-
-    RTC_TimeTypeDef sTime = {0};
-        RTC_DateTypeDef sDate = {0};
-        HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
-        HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
-
-    // 1. Nếu là thẻ mới hoàn toàn (thẻ khác), mới reset lịch sử
-    if (memcmp(current_card_log.uid, uid, 4) != 0) {
-        memcpy(current_card_log.uid, uid, 4);
-        current_card_log.count = 0;
-        for(int i=0; i<3; i++) current_card_log.weight_history[i] = 0.0f;
-    }
-
-    // 2. Chống lặp: Chỉ lưu nếu giá trị khác với bản ghi cuối cùng đã lưu
-    if (current_card_log.count > 0 && current_card_log.weight_history[current_card_log.count - 1] == new_weight)
-        return;
-
-    if (current_card_log.count == 3) {
-            for (int i = 0; i < 2; i++) {
-                current_card_log.weight_history[i] = current_card_log.weight_history[i + 1];
-                current_card_log.time_history[i] = current_card_log.time_history[i + 1];
-            }
-            // Ghi bản ghi mới vào vị trí cuối (index 2)
-            current_card_log.weight_history[2] = new_weight;
-            current_card_log.time_history[2] = (TimeStamp_t){sDate.Date, sDate.Month, sDate.Year, sTime.Hours, sTime.Minutes, sTime.Seconds};
-        } else {
-            // Ghi vào vị trí tiếp theo nếu count < 3
-            int idx = current_card_log.count;
-            current_card_log.weight_history[idx] = new_weight;
-            current_card_log.time_history[idx] = (TimeStamp_t){sDate.Date, sDate.Month, sDate.Year, sTime.Hours, sTime.Minutes, sTime.Seconds};
-            current_card_log.count++;
-        }
-
-    // 4. In ra 3 bản ghi hiện có
-    sprintf(uart_tx_buffer, "\r\n--- History (UID: %02X%02X%02X%02X) ---\r\n",
-            uid[0], uid[1], uid[2], uid[3]);
-    HAL_UART_Transmit(&huart1, (uint8_t *)uart_tx_buffer, strlen(uart_tx_buffer), 100);
-
-    for (int i = 0; i < current_card_log.count; i++) {
-        int32_t h_int = (int32_t)current_card_log.weight_history[i];
-        int32_t h_frac = (int32_t)((current_card_log.weight_history[i] - (float)h_int) * 100.0f);
-        if (h_frac < 0) h_frac = -h_frac;
-
-        sprintf(uart_tx_buffer, "%d: %ld.%02ld kg | %02d:%02d:%02d - %02d/%02d/20%02d\r\n",
-                i + 1, h_int, h_frac,
-                current_card_log.time_history[i].hour,
-                current_card_log.time_history[i].minute,
-                current_card_log.time_history[i].second,
-                current_card_log.time_history[i].day,
-                current_card_log.time_history[i].month,
-                current_card_log.time_history[i].year);
-        HAL_UART_Transmit(&huart1, (uint8_t *)uart_tx_buffer, strlen(uart_tx_buffer), 100);
-    }
-}
 
 // ==========================================
 // DRIVER NGOẠI VI 1: CẢM BIẾN TRỌNG LƯỢNG HX711
@@ -752,13 +700,60 @@ float HX711_GetWeight(void)
         return 0.0f;
     }
     if (new_weight < 0.01f)
-        {
-            return 0.0f;
-        }
+    {
+        return 0.0f;
+    }
 
     return new_weight;
 }
+float HX711_GetStableWeight(void)
+{
 
+    float value[10];
+
+
+    while(1)
+    {
+
+        float max = -999;
+        float min = 999;
+        float sum = 0;
+
+
+        for(int i=0;i<10;i++)
+        {
+
+            value[i]=HX711_GetWeight();
+
+
+            if(value[i]>max)
+                max=value[i];
+
+
+            if(value[i]<min)
+                min=value[i];
+
+
+            sum += value[i];
+
+
+            HAL_Delay(100);
+        }
+
+
+
+        // sai lệch nhỏ hơn 50 gram
+        if((max-min)<0.05f)
+        {
+
+            return sum/10;
+
+        }
+
+
+    }
+
+}
 // ==========================================
 // DRIVER NGOẠI VI 3: ĐỌC THẺ RFID RC522 (SPI)
 // ==========================================
@@ -902,7 +897,7 @@ uint8_t RC522_CheckCard(uint8_t *id)
     status = RC522_ToCard(PCD_TRANSCEIVE, buf, 1, buf, &len);
     if (status != 0)
     {
-        //HAL_UART_Transmit(&huart1, (uint8_t *)"[DEBUG] WUPA Failed\r\n", 21, 100);
+        // HAL_UART_Transmit(&huart1, (uint8_t *)"[DEBUG] WUPA Failed\r\n", 21, 100);
         return 1;
     }
 
@@ -915,7 +910,7 @@ uint8_t RC522_CheckCard(uint8_t *id)
     status = RC522_ToCard(PCD_TRANSCEIVE, buf, 2, buf, &len);
     if (status != 0)
     {
-        //HAL_UART_Transmit(&huart1, (uint8_t *)"[DEBUG] ANTI Failed\r\n", 21, 100);
+        // HAL_UART_Transmit(&huart1, (uint8_t *)"[DEBUG] ANTI Failed\r\n", 21, 100);
         return 1;
     }
 
@@ -937,42 +932,239 @@ uint8_t RC522_CheckCard(uint8_t *id)
 // ==========================================
 // TRUYỀN DỮ LIỆU ĐÓNG GÓI CHUẨN JSON VỀ PC
 // ==========================================
+void Send_History_To_PC(uint8_t *uid, float latest)
+{
 
+    char buffer[512];
+
+    LogEntry_t logs[5];
+
+    Read_History(logs, SEND_HISTORY);
+
+
+    // ===== Tách latest weight =====
+    int latest_int = (int)latest;
+    int latest_dec = (int)((latest - latest_int) * 100);
+
+    if(latest_dec < 0)
+        latest_dec = -latest_dec;
+
+
+    sprintf(buffer,
+            "{\r\n"
+            "\"uid\":\"%02X%02X%02X%02X\",\r\n"
+            "\"latest_weight\":%d.%02d,\r\n"
+            "\"history\":[",
+
+            uid[0],
+            uid[1],
+            uid[2],
+            uid[3],
+
+            latest_int,
+            latest_dec);
+
+
+    HAL_UART_Transmit(
+        &huart1,
+        (uint8_t *)buffer,
+        strlen(buffer),
+        1000);
+
+
+
+    uint8_t count;
+
+
+    EEPROM_Read(
+        COUNT_ADDR,
+        &count,
+        1);
+
+
+
+    if(count > 5)
+        count = 5;
+
+
+
+    for(int i = 0; i < count; i++)
+    {
+
+        // ===== Tách weight lịch sử =====
+
+        int weight_int = (int)logs[i].weight;
+
+        int weight_dec =
+            (int)((logs[i].weight - weight_int) * 100);
+
+
+        if(weight_dec < 0)
+            weight_dec = -weight_dec;
+
+
+
+        sprintf(buffer,
+
+                "{\"weight\":%d.%02d,"
+                "\"date\":\"%02d/%02d/20%02d\","
+                "\"time\":\"%02d:%02d:%02d\"}",
+
+
+                weight_int,
+                weight_dec,
+
+
+                logs[i].ts.day,
+                logs[i].ts.month,
+                logs[i].ts.year,
+
+
+                logs[i].ts.hour,
+                logs[i].ts.minute,
+                logs[i].ts.second);
+
+
+
+        HAL_UART_Transmit(
+            &huart1,
+            (uint8_t *)buffer,
+            strlen(buffer),
+            1000);
+
+
+
+        if(i < count-1)
+        {
+            HAL_UART_Transmit(
+                &huart1,
+                (uint8_t *)",",
+                1,
+                100);
+        }
+
+    }
+
+
+
+    sprintf(buffer,
+            "]\r\n"
+            "}\r\n");
+
+
+
+    HAL_UART_Transmit(
+        &huart1,
+        (uint8_t *)buffer,
+        strlen(buffer),
+        1000);
+
+}
 void Send_Data_To_PC(float weight)
 {
     int32_t w_int = (int32_t)weight;
     int32_t w_frac = (int32_t)((weight - (float)w_int) * 100.0f);
     if (w_frac < 0)
         w_frac = -w_frac;
+    DS1307_Time rtc;
 
-    RTC_TimeTypeDef sTime = {0};
-    RTC_DateTypeDef sDate = {0};
-    HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
-    HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+    DS1307_GetTime(&rtc);
 
     sprintf(uart_tx_buffer,
             "{\r\n  \"uid\": \"%02X%02X%02X%02X\",\r\n  \"weight\": %ld.%02ld,\r\n }\r\n",
             card_uid[0], card_uid[1], card_uid[2], card_uid[3],
             w_int, w_frac);
 
-    if (is_card_detected == 0) {
-            sprintf(uart_tx_buffer, "{\r\n  \"uid\": \"00000000\",\r\n  \"weight\": %ld.%02ld,\r\n }\r\n",
-                    w_int, w_frac);
-        } else {
-            sprintf(uart_tx_buffer, "{\r\n  \"uid\": \"%02X%02X%02X%02X\",\r\n  \"weight\": %ld.%02ld,\r\n }\r\n",
-                    card_uid[0], card_uid[1], card_uid[2], card_uid[3], w_int, w_frac);
-        }
+    if (is_card_detected == 0)
+    {
+        sprintf(uart_tx_buffer, "{\r\n  \"uid\": \"00000000\",\r\n  \"weight\": %ld.%02ld,\r\n }\r\n",
+                w_int, w_frac);
+    }
+    else
+    {
+        sprintf(uart_tx_buffer, "{\r\n  \"uid\": \"%02X%02X%02X%02X\",\r\n  \"weight\": %ld.%02ld,\r\n }\r\n",
+                card_uid[0], card_uid[1], card_uid[2], card_uid[3], w_int, w_frac);
+    }
 
-        HAL_UART_Transmit(&huart1, (uint8_t *)uart_tx_buffer, strlen(uart_tx_buffer), 1000);
-
+    HAL_UART_Transmit(&huart1, (uint8_t *)uart_tx_buffer, strlen(uart_tx_buffer), 1000);
 }
 void Send_Card_ID_To_PC(uint8_t *uid)
 {
-//    sprintf(uart_tx_buffer, "\r\n[INFO] Card Detected! ID: %02X%02X%02X%02X\r\n",
-//            uid[0], uid[1], uid[2], uid[3]);
-//    HAL_UART_Transmit(&huart1, (uint8_t *)uart_tx_buffer, strlen(uart_tx_buffer), 1000);
+    //    sprintf(uart_tx_buffer, "\r\n[INFO] Card Detected! ID: %02X%02X%02X%02X\r\n",
+    //            uid[0], uid[1], uid[2], uid[3]);
+    //    HAL_UART_Transmit(&huart1, (uint8_t *)uart_tx_buffer, strlen(uart_tx_buffer), 1000);
 }
+void Read_History(LogEntry_t *logs, uint8_t number)
+{
+    uint8_t count;
 
+    EEPROM_Read(COUNT_ADDR,&count,1);
+
+
+    if(count > MAX_HISTORY)
+        count = MAX_HISTORY;
+
+
+    if(number > count)
+        number = count;
+
+
+    for(int i=0;i<number;i++)
+    {
+        uint8_t index = (count - 1 - i) % MAX_HISTORY;
+
+
+        EEPROM_Read(
+            START_ADDR + index*sizeof(LogEntry_t),
+            (uint8_t*)&logs[i],
+            sizeof(LogEntry_t)
+        );
+    }
+}
+void Add_History(
+        int id,
+        float weight)
+{
+
+    UserProfile_t user;
+
+
+    EEPROM_Read(
+        USER_ADDR(id),
+        (uint8_t*)&user,
+        sizeof(user)
+    );
+
+
+    for(int i=MAX_HISTORY-1;i>0;i--)
+    {
+        user.history[i]=user.history[i-1];
+    }
+
+
+    user.history[0].weight=weight;
+
+
+    // lấy RTC ở đây
+    user.history[0].ts.day=rtc_date;
+    user.history[0].ts.month=rtc_month;
+    user.history[0].ts.year=rtc_year;
+
+
+    user.count++;
+
+
+    if(user.count>5)
+        user.count=5;
+
+
+    EEPROM_Write(
+        USER_ADDR(id),
+        (uint8_t*)&user,
+        sizeof(user)
+    );
+
+}
 void Display_Data_On_OLED(float weight, uint8_t *uid)
 {
     char buffer[20];
@@ -981,7 +1173,7 @@ void Display_Data_On_OLED(float weight, uint8_t *uid)
 
     // Lời chào
     SSD1306_GotoXY(0, 0);
-    //SSD1306_Puts("Xin chao !", &Font_7x10, SSD1306_COLOR_WHITE);
+    // SSD1306_Puts("Xin chao !", &Font_7x10, SSD1306_COLOR_WHITE);
 
     // Hiển thị Cân Nặng (Tách số thực thành 2 phần nguyên để in, tránh lỗi %f)
     int32_t w_int = (int32_t)weight;
@@ -1055,36 +1247,42 @@ void LED_Scan_Routine(void)
     // 4. Luân chuyển giữa 2 LED
     current_led = (current_led == 0) ? 1 : 0;
 }
-
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM6)
+    {
+        LED_Scan_Routine();
+    }
+}
 /* USER CODE END 4 */
 
 /**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
+ * @brief  This function is executed in case of error occurrence.
+ * @retval None
+ */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
+    /* USER CODE BEGIN Error_Handler_Debug */
     /* User can add his own implementation to report the HAL error return state */
     __disable_irq();
     while (1)
     {
     }
-  /* USER CODE END Error_Handler_Debug */
+    /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
 /**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
+ * @brief  Reports the name of the source file and the source line number
+ *         where the assert_param error has occurred.
+ * @param  file: pointer to the source file name
+ * @param  line: assert_param error line source number
+ * @retval None
+ */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  /* USER CODE BEGIN 6 */
+    /* USER CODE BEGIN 6 */
     /* User can add his own implementation to report the file name and line number,
        ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
+    /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
