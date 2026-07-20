@@ -2,12 +2,12 @@
 #define HISTORY_H
 
 
-#define MAX_HISTORY 5
+#define MAX_HISTORY 3
 
 
-#define START_ADDR 0x1000
+#define START_ADDR 0xB0
 
-#define COUNT_ADDR 0x2000
+#define COUNT_ADDR 0xD4
 
 
 

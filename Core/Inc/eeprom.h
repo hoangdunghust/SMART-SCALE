@@ -10,5 +10,6 @@ void EEPROM_Write(uint16_t mem_addr, uint8_t *data, uint16_t size);
 void EEPROM_Read(uint16_t mem_addr, uint8_t *data, uint16_t size);
 int Find_User(uint8_t *uid);
 int Create_User(uint8_t *uid);
+void EEPROM_Init(void);
 
 #endif

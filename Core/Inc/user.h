@@ -5,9 +5,9 @@
 #include "stdint.h"
 
 
-#define MAX_USER 10
+#define MAX_USER 4
 
-#define USER_START_ADDR 0x0200
+#define USER_START_ADDR 0x00
 
 
 
@@ -41,7 +41,7 @@ typedef struct
     uint8_t uid[4];
 
 
-    History_t history[5];
+    History_t history[3];
 
 
     uint8_t count;
