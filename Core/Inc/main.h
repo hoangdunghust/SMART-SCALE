@@ -61,8 +61,6 @@ void Error_Handler(void);
 #define HX711_DOUT_GPIO_Port GPIOE
 #define HX711_SCK_Pin GPIO_PIN_3
 #define HX711_SCK_GPIO_Port GPIOE
-#define User_Button_Pin GPIO_PIN_0
-#define User_Button_GPIO_Port GPIOA
 #define RFID__CS_Pin GPIO_PIN_4
 #define RFID__CS_GPIO_Port GPIOA
 #define RFID_RST_Pin GPIO_PIN_5

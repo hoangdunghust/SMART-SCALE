@@ -190,13 +190,13 @@ int main(void)
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
     HAL_TIM_Base_Start_IT(&htim6);
-    // Chèn vào đầu hàm main sau khi khởi tạo I2C
-    for (uint8_t i = 0; i < 127; i++)
+    // Quét I2C Bus để kiểm tra thiết bị kết nối
+    for (uint8_t i = 1; i < 127; i++)
     {
         if (HAL_I2C_IsDeviceReady(&hi2c1, i << 1, 1, 10) == HAL_OK)
         {
-            char msg[20];
-            sprintf(msg, "Found: 0x%02X\r\n", i);
+            char msg[32];
+            sprintf(msg, "I2C Found: 0x%02X\r\n", i);
             HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
         }
     }
@@ -211,16 +211,7 @@ int main(void)
     // Khởi tạo thẻ RFID RC522
     RC522_Init();
 
-    // HAL_UART_Transmit(&huart1, (uint8_t *)"Scanning I2C Bus...\r\n", 21, 100);
-    for (uint8_t i = 0; i < 255; i++)
-    {
-        if (HAL_I2C_IsDeviceReady(&hi2c1, i, 1, 10) == HAL_OK)
-        {
-            char msg[30];
-            //            sprintf(msg, "Found device at: 0x%02X\r\n", i);
-            //            HAL_UART_Transmit(&huart1, (uint8_t *)msg, strlen(msg), 100);
-        }
-    }
+    // (Đã gộp I2C scanner vào phần trên, xóa vòng lặp trùng lặp ở đây)
 
     // Khởi tạo và format EEPROM nếu đây là lần khởi động đầu tiên
     EEPROM_Init();
@@ -268,16 +259,13 @@ int main(void)
             }
             else
             {
-                // In debug ra UART để kiểm tra tại sao Find_User thất bại
                 char dbg[128];
-                sprintf(dbg, "[DEBUG] Card UID: %02X%02X%02X%02X\r\n", card_uid[0], card_uid[1], card_uid[2], card_uid[3]);
                 HAL_UART_Transmit(&huart1, (uint8_t *)dbg, strlen(dbg), 100);
 
                 for (int i = 0; i < MAX_USER; i++)
                 {
                     UserProfile_t u;
                     EEPROM_Read(USER_ADDR(i), (uint8_t*)&u, sizeof(UserProfile_t));
-                    sprintf(dbg, "[DEBUG] Slot %d UID: %02X%02X%02X%02X, count: %d\r\n", i, u.uid[0], u.uid[1], u.uid[2], u.uid[3], u.count);
                     HAL_UART_Transmit(&huart1, (uint8_t *)dbg, strlen(dbg), 100);
                 }
 
@@ -375,7 +363,7 @@ int main(void)
             int w_int = (int)current_weight;
             int w_frac = (int)((current_weight - w_int) * 100);
             if (w_frac < 0) w_frac = -w_frac;
-            sprintf(dbg_hx, "[DEBUG] Weight: %d.%02d kg, Raw ADC: %ld\r\n", w_int, w_frac, current_raw_val);
+
             HAL_UART_Transmit(&huart1, (uint8_t *)dbg_hx, strlen(dbg_hx), 100);
 
             Update_LED_Buffer(current_weight);
@@ -429,16 +417,13 @@ int main(void)
             last_card_detect_time = HAL_GetTick();
             
             char dbg_scan[64];
-            sprintf(dbg_scan, "[DEBUG] Card set time: %lu\r\n", last_card_detect_time);
             HAL_UART_Transmit(&huart1, (uint8_t *)dbg_scan, strlen(dbg_scan), 100);
         }
 
         // Tự động xóa trạng thái nhận thẻ sau 10 giây để OLED quay lại hiện "No Card"
         if (history_index == -1 && is_card_detected && (HAL_GetTick() - last_card_detect_time >= 10000))
         {
-            char dbg_timeout[128];
-            sprintf(dbg_timeout, "[DEBUG] Card cleared. GetTick: %lu, diff: %lu\r\n", 
-                    HAL_GetTick(), HAL_GetTick() - last_card_detect_time);
+            char dbg_timeout[64];
             HAL_UART_Transmit(&huart1, (uint8_t *)dbg_timeout, strlen(dbg_timeout), 100);
 
             is_card_detected = 0;
@@ -735,11 +720,11 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : User_Button_Pin */
-  GPIO_InitStruct.Pin = User_Button_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  /*Configure GPIO pin : PA0 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(User_Button_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pin : RFID__CS_Pin */
   GPIO_InitStruct.Pin = RFID__CS_Pin;
@@ -771,12 +756,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(RFID_RST_GPIO_Port, &GPIO_InitStruct);
 
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-  /* Ghi đè cấu hình chân PA0 thành ngắt ngoài EXTI (Cạnh lên) để tránh bị cấu hình mặc định của CubeMX xóa mất */
-  GPIO_InitStruct.Pin = GPIO_PIN_0;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* Cài đặt độ ưu tiên và bật ngắt EXTI Line 0 */
   HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
@@ -1039,7 +1018,6 @@ uint8_t RC522_CheckCard(uint8_t *id)
     status = RC522_ToCard(PCD_TRANSCEIVE, buf, 1, buf, &len);
     if (status != 0)
     {
-        // HAL_UART_Transmit(&huart1, (uint8_t *)"[DEBUG] WUPA Failed\r\n", 21, 100);
         return 1;
     }
 
@@ -1052,7 +1030,6 @@ uint8_t RC522_CheckCard(uint8_t *id)
     status = RC522_ToCard(PCD_TRANSCEIVE, buf, 2, buf, &len);
     if (status != 0)
     {
-        // HAL_UART_Transmit(&huart1, (uint8_t *)"[DEBUG] ANTI Failed\r\n", 21, 100);
         return 1;
     }
 
